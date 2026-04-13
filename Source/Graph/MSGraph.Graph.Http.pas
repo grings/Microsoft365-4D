@@ -53,6 +53,7 @@ type
 
     function GetWithHeaders(const Endpoint: string; const QueryParams: string;
       const ExtraHeaders: TArray<string>): TJSONObject;
+    function GetAbsoluteUrl(const FullUrl: string): TJSONObject;
 
     function GetUserPrefix: string;
     function IsSharedMailbox: Boolean;
@@ -280,6 +281,12 @@ begin
   finally
     FExtraHeaders := nil;
   end;
+end;
+
+function TGraphHttpClient.GetAbsoluteUrl(const FullUrl: string): TJSONObject;
+begin
+  Log(LogDebug, MethodGet + ' ' + FullUrl);
+  Result := ExecuteRequest(MethodGet, FullUrl);
 end;
 
 function TGraphHttpClient.Post(const Endpoint: string; const Body: string): TJSONObject;

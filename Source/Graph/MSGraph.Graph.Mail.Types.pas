@@ -58,6 +58,16 @@ type
     NewMessageId: string;
   end;
 
+  TDeltaMessageChange = record
+    Message: TMailMessage;
+    IsRemoved: Boolean;
+  end;
+
+  TDeltaSyncResult = record
+    Changes: TArray<TDeltaMessageChange>;
+    DeltaLink: string;
+  end;
+
 implementation
 
 end.
