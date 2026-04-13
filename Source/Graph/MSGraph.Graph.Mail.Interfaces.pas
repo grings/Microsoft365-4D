@@ -36,6 +36,8 @@ type
     function AddAttachment(const MessageId, FileName, ContentType: string;
       const ContentBytes: TBytes): Boolean;
     function GetMessageMimeContent(const MessageId: string): TBytes;
+    function DeltaSyncMessages(const FolderId: string; const DeltaLink: string): TDeltaSyncResult;
+    function InitializeDeltaLink(const FolderId: string): string;
   end;
 
 implementation

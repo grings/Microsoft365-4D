@@ -11,6 +11,8 @@ uses
   MSGraph.Graph.Mail.Interfaces;
 
 type
+  EDeltaLinkExpiredException = class(EGraphApiException);
+
   TMailClient = class(TInterfacedObject, IMailClient)
   strict private
     FGraphClient: TGraphHttpClient;
@@ -33,10 +35,14 @@ type
     class function ParseAttachment(const AttachObj: TJSONObject): TMailAttachment; static;
     class function BuildSearchQueryParams(const SearchQuery: string; const UseSearch: Boolean;
       const FilterUnread: Boolean; const ActualTop: Integer; const Skip: Integer): string; static;
+    function ExecuteDeltaPages(const FolderId, SelectFields, DeltaLink: string;
+      const ItemProcessor: TProc<TJSONObject>): string;
 
     const
       ContentTypeHtml = 'HTML';
       ContentTypeText = 'Text';
+      MessageSelectFields = 'id,subject,from,toRecipients,ccRecipients,receivedDateTime,' +
+        'isRead,hasAttachments,bodyPreview,body,importance,parentFolderId';
   public
     constructor Create(const AccessToken: string; const LogProc: TLogProc = nil); overload;
     constructor Create(const GraphClient: TGraphHttpClient; const OwnsClient: Boolean = False); overload;
@@ -69,6 +75,8 @@ type
     function AddAttachment(const MessageId, FileName, ContentType: string;
       const ContentBytes: TBytes): Boolean;
     function GetMessageMimeContent(const MessageId: string): TBytes;
+    function DeltaSyncMessages(const FolderId: string; const DeltaLink: string): TDeltaSyncResult;
+    function InitializeDeltaLink(const FolderId: string): string;
 
     property GraphClient: TGraphHttpClient read FGraphClient;
   end;
@@ -679,9 +687,6 @@ end;
 
 function TMailClient.ListFolderMessages(const FolderId: string;
   const Top: Integer; const Skip: Integer): TSearchMessagesResult;
-const
-  SelectFields = 'id,subject,from,toRecipients,ccRecipients,receivedDateTime,' +
-    'isRead,hasAttachments,bodyPreview,body,importance,parentFolderId';
 begin
   Result := Default(TSearchMessagesResult);
 
@@ -691,7 +696,7 @@ begin
   else
     Endpoint := EndpointMessages;
 
-  var QueryParams := '$select=' + SelectFields +
+  var QueryParams := '$select=' + MessageSelectFields +
     '&$orderby=receivedDateTime desc' +
     '&$top=' + Top.ToString;
 
@@ -783,6 +788,104 @@ begin
   finally
     RequestBody.Free;
   end;
+end;
+
+function TMailClient.ExecuteDeltaPages(const FolderId, SelectFields, DeltaLink: string;
+  const ItemProcessor: TProc<TJSONObject>): string;
+begin
+  Result := '';
+
+  var Response: TJSONObject;
+  const IsInitialSync = DeltaLink.IsEmpty;
+  if IsInitialSync then
+  begin
+    var Endpoint := EndpointMailFolders + '/' + TNetEncoding.URL.Encode(FolderId) + '/messages/delta';
+    Response := FGraphClient.Get(Endpoint, '$select=' + SelectFields);
+  end
+  else
+    Response := FGraphClient.GetAbsoluteUrl(DeltaLink);
+
+  var Done: Boolean;
+  repeat
+    var NextLink := '';
+    try
+      if TGraphJson.HasError(Response) then
+      begin
+        var ErrorMsg := TGraphJson.GetErrorMessage(Response);
+        const IsDeltaExpired = ErrorMsg.Contains('HTTP 410') or
+          ErrorMsg.Contains('resyncRequired') or ErrorMsg.Contains('syncStateNotFound');
+        if IsDeltaExpired then
+          raise EDeltaLinkExpiredException.Create(ErrorMsg);
+        raise EGraphApiException.Create(ErrorMsg);
+      end;
+
+      if Assigned(ItemProcessor) then
+      begin
+        var ValueArray := TGraphJson.GetArray(Response, 'value');
+        if Assigned(ValueArray) then
+          for var Index := 0 to ValueArray.Count - 1 do
+          begin
+            var ItemObj := TGraphJson.ArrayItem(ValueArray, Index);
+            if Assigned(ItemObj) then
+              ItemProcessor(ItemObj);
+          end;
+      end;
+
+      var DeltaLinkValue := Response.GetValue('@odata.deltaLink');
+      if Assigned(DeltaLinkValue) then
+        Result := DeltaLinkValue.Value;
+
+      var NextLinkValue := Response.GetValue('@odata.nextLink');
+      if Assigned(NextLinkValue) then
+        NextLink := NextLinkValue.Value;
+
+      Done := (not Result.IsEmpty) or NextLink.IsEmpty;
+    finally
+      Response.Free;
+    end;
+
+    if not Done then
+      Response := FGraphClient.GetAbsoluteUrl(NextLink);
+  until Done;
+end;
+
+function TMailClient.DeltaSyncMessages(const FolderId: string; const DeltaLink: string): TDeltaSyncResult;
+begin
+  Result := Default(TDeltaSyncResult);
+  var Changes: TArray<TDeltaMessageChange>;
+  var ChangeCount := 0;
+
+  Result.DeltaLink := ExecuteDeltaPages(FolderId, MessageSelectFields, DeltaLink,
+    procedure(ItemObj: TJSONObject)
+    begin
+      if ChangeCount >= Length(Changes) then
+        SetLength(Changes, ChangeCount + 256);
+
+      var Change: TDeltaMessageChange;
+      const IsRemoved = Assigned(TGraphJson.GetObject(ItemObj, '@removed'));
+      if IsRemoved then
+      begin
+        Change.IsRemoved := True;
+        Change.Message := Default(TMailMessage);
+        Change.Message.Id := TGraphJson.GetString(ItemObj, 'id');
+      end
+      else
+      begin
+        Change.IsRemoved := False;
+        Change.Message := ParseMessage(ItemObj);
+      end;
+
+      Changes[ChangeCount] := Change;
+      Inc(ChangeCount);
+    end);
+
+  SetLength(Changes, ChangeCount);
+  Result.Changes := Changes;
+end;
+
+function TMailClient.InitializeDeltaLink(const FolderId: string): string;
+begin
+  Result := ExecuteDeltaPages(FolderId, MessageSelectFields, '', nil);
 end;
 
 end.
