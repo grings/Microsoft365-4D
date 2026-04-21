@@ -10,6 +10,7 @@ type
 
   TMailMessage = record
     Id: string;
+    ConversationId: string;
     Subject: string;
     From: TEmailAddress;
     ToRecipients: TArray<TEmailAddress>;
