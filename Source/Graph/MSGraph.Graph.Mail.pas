@@ -41,7 +41,7 @@ type
     const
       ContentTypeHtml = 'HTML';
       ContentTypeText = 'Text';
-      MessageSelectFields = 'id,subject,from,toRecipients,ccRecipients,receivedDateTime,' +
+      MessageSelectFields = 'id,conversationId,subject,from,toRecipients,ccRecipients,receivedDateTime,' +
         'isRead,hasAttachments,bodyPreview,body,importance,parentFolderId';
   public
     constructor Create(const AccessToken: string; const LogProc: TLogProc = nil); overload;
@@ -194,6 +194,7 @@ begin
   if not Assigned(MsgObj) then
     Exit;
   Result.Id := TGraphJson.GetString(MsgObj, 'id');
+  Result.ConversationId := TGraphJson.GetString(MsgObj, 'conversationId');
   Result.Subject := TGraphJson.GetString(MsgObj, 'subject');
   Result.From := ParseEmailAddress(TGraphJson.GetObject(MsgObj, 'from'));
   Result.ToRecipients := ParseRecipients(MsgObj, 'toRecipients');
@@ -250,7 +251,7 @@ end;
 class function TMailClient.BuildSearchQueryParams(const SearchQuery: string; const UseSearch: Boolean;
   const FilterUnread: Boolean; const ActualTop: Integer; const Skip: Integer): string;
 begin
-  Result := '$select=id,subject,from,toRecipients,ccRecipients,receivedDateTime,isRead,hasAttachments,bodyPreview,importance,parentFolderId';
+  Result := '$select=id,conversationId,subject,from,toRecipients,ccRecipients,receivedDateTime,isRead,hasAttachments,bodyPreview,importance,parentFolderId';
 
   const IncludeBody = (ActualTop <= 5);
   if IncludeBody then
@@ -328,7 +329,7 @@ end;
 function TMailClient.GetMessage(const MessageId: string; const IncludeBody: Boolean): TMailMessage;
 begin
   var Response := FGraphClient.Get(MessageEndpoint(MessageId),
-    '$select=id,subject,from,toRecipients,ccRecipients,receivedDateTime,isRead,hasAttachments,body,bodyPreview,importance,parentFolderId');
+    '$select=id,conversationId,subject,from,toRecipients,ccRecipients,receivedDateTime,isRead,hasAttachments,body,bodyPreview,importance,parentFolderId');
   try
     if TGraphJson.HasError(Response) then
       raise EGraphApiException.Create(TGraphJson.GetErrorMessage(Response));
