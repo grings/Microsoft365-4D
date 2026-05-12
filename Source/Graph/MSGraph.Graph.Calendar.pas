@@ -30,6 +30,11 @@ type
     class function ParseEvent(const EventObj: TJSONObject): TCalendarEvent; static;
     class function ParseScheduleItem(const ItemObj: TJSONObject): TScheduleItemEntry; static;
     class function ParseScheduleResult(const ScheduleObj: TJSONObject): TScheduleResult; static;
+
+    function FetchCalendarPage(const QueryParams: string; const Timezone: string;
+      out NextLink: string): TArray<TCalendarEvent>;
+    function FetchCalendarPageFromUrl(const FullUrl: string;
+      out NextLink: string): TArray<TCalendarEvent>;
   public
     constructor Create(const AccessToken: string; const LogProc: TLogProc = nil); overload;
     constructor Create(const GraphClient: TGraphHttpClient; const OwnsClient: Boolean = False); overload;
@@ -37,6 +42,9 @@ type
 
     function ListEvents(const StartDateTime: TDateTime; const EndDateTime: TDateTime;
       const Top: Integer = 50; const Timezone: string = ''): TArray<TCalendarEvent>;
+    function SearchEvents(const Query: string;
+      const StartDateTime: TDateTime; const EndDateTime: TDateTime;
+      const Timezone: string = ''): TArray<TCalendarEvent>;
     function GetEvent(const EventId: string): TCalendarEvent;
     function CreateEvent(const Subject: string; const StartDateTime: TDateTime;
       const EndDateTime: TDateTime; const Location: string; const Body: string;
@@ -64,6 +72,7 @@ implementation
 uses
   System.SysUtils,
   System.NetEncoding,
+  System.Generics.Collections,
   MSGraph.Graph.JsonHelper;
 
 constructor TCalendarClient.Create(const AccessToken: string; const LogProc: TLogProc);
@@ -265,23 +274,11 @@ begin
     Result.Items[Index] := ParseScheduleItem(TGraphJson.ArrayItem(ItemsArr, Index));
 end;
 
-function TCalendarClient.ListEvents(const StartDateTime: TDateTime;
-  const EndDateTime: TDateTime; const Top: Integer; const Timezone: string): TArray<TCalendarEvent>;
+function TCalendarClient.FetchCalendarPage(const QueryParams: string;
+  const Timezone: string; out NextLink: string): TArray<TCalendarEvent>;
 begin
   Result := nil;
-
-  var ActualTop := Top;
-  if ActualTop < 1 then
-    ActualTop := 50
-  else if ActualTop > 100 then
-    ActualTop := 100;
-
-  var StartISO := DateTimeToISO8601(StartDateTime);
-  var EndISO := DateTimeToISO8601(EndDateTime);
-
-  var QueryParams := Format(
-    'startDateTime=%s&endDateTime=%s&$top=%d&$orderby=start/dateTime&$select=id,subject,start,end,location,organizer,attendees,isAllDay,isCancelled,webLink,bodyPreview',
-    [TNetEncoding.URL.Encode(StartISO), TNetEncoding.URL.Encode(EndISO), ActualTop]);
+  NextLink := '';
 
   var Response: TJSONObject;
   if not Timezone.Trim.IsEmpty then
@@ -295,14 +292,109 @@ begin
       raise EGraphApiException.Create(TGraphJson.GetErrorMessage(Response));
 
     var ValueArray := TGraphJson.GetArray(Response, 'value');
-    if not Assigned(ValueArray) then
-      Exit;
+    if Assigned(ValueArray) then
+    begin
+      SetLength(Result, ValueArray.Count);
+      for var Index := 0 to ValueArray.Count - 1 do
+        Result[Index] := ParseEvent(TGraphJson.ArrayItem(ValueArray, Index));
+    end;
 
-    SetLength(Result, ValueArray.Count);
-    for var Index := 0 to ValueArray.Count - 1 do
-      Result[Index] := ParseEvent(TGraphJson.ArrayItem(ValueArray, Index));
+    var NextLinkValue := Response.GetValue('@odata.nextLink');
+    if Assigned(NextLinkValue) then
+      NextLink := NextLinkValue.Value;
   finally
     Response.Free;
+  end;
+end;
+
+function TCalendarClient.FetchCalendarPageFromUrl(const FullUrl: string;
+  out NextLink: string): TArray<TCalendarEvent>;
+begin
+  Result := nil;
+  NextLink := '';
+
+  var Response := FGraphClient.GetAbsoluteUrl(FullUrl);
+  try
+    if TGraphJson.HasError(Response) then
+      raise EGraphApiException.Create(TGraphJson.GetErrorMessage(Response));
+
+    var ValueArray := TGraphJson.GetArray(Response, 'value');
+    if Assigned(ValueArray) then
+    begin
+      SetLength(Result, ValueArray.Count);
+      for var Index := 0 to ValueArray.Count - 1 do
+        Result[Index] := ParseEvent(TGraphJson.ArrayItem(ValueArray, Index));
+    end;
+
+    var NextLinkValue := Response.GetValue('@odata.nextLink');
+    if Assigned(NextLinkValue) then
+      NextLink := NextLinkValue.Value;
+  finally
+    Response.Free;
+  end;
+end;
+
+function TCalendarClient.ListEvents(const StartDateTime: TDateTime;
+  const EndDateTime: TDateTime; const Top: Integer; const Timezone: string): TArray<TCalendarEvent>;
+begin
+  var ActualTop := Top;
+  if ActualTop < 1 then
+    ActualTop := 50
+  else if ActualTop > 100 then
+    ActualTop := 100;
+
+  var StartISO := DateTimeToISO8601(StartDateTime);
+  var EndISO := DateTimeToISO8601(EndDateTime);
+
+  var QueryParams := Format(
+    'startDateTime=%s&endDateTime=%s&$top=%d&$orderby=start/dateTime&$select=id,subject,start,end,location,organizer,attendees,isAllDay,isCancelled,webLink,bodyPreview',
+    [TNetEncoding.URL.Encode(StartISO), TNetEncoding.URL.Encode(EndISO), ActualTop]);
+
+  var IgnoredNextLink := '';
+  Result := FetchCalendarPage(QueryParams, Timezone, IgnoredNextLink);
+end;
+
+function TCalendarClient.SearchEvents(const Query: string;
+  const StartDateTime: TDateTime; const EndDateTime: TDateTime;
+  const Timezone: string): TArray<TCalendarEvent>;
+const
+  GraphMaxPageSize = 1000;
+begin
+  Result := nil;
+  if Query.Trim.IsEmpty then
+    Exit;
+
+  var StartISO := DateTimeToISO8601(StartDateTime);
+  var EndISO := DateTimeToISO8601(EndDateTime);
+
+  var QueryParams := Format(
+    'startDateTime=%s&endDateTime=%s&$top=%d&$orderby=start/dateTime&$select=id,subject,start,end,location,organizer,attendees,isAllDay,isCancelled,webLink,body,bodyPreview',
+    [TNetEncoding.URL.Encode(StartISO), TNetEncoding.URL.Encode(EndISO), GraphMaxPageSize]);
+
+  const QueryLower = Query.ToLower;
+  var Matches := TList<TCalendarEvent>.Create;
+  try
+    var NextLink := '';
+    var Page := FetchCalendarPage(QueryParams, Timezone, NextLink);
+    while True do
+    begin
+      for var Event in Page do
+      begin
+        const SubjectHit = Event.Subject.ToLower.Contains(QueryLower);
+        const BodyHit = Event.Body.ToLower.Contains(QueryLower);
+        if SubjectHit or BodyHit then
+          Matches.Add(Event);
+      end;
+
+      if NextLink.IsEmpty then
+        Break;
+
+      Page := FetchCalendarPageFromUrl(NextLink, NextLink);
+    end;
+
+    Result := Matches.ToArray;
+  finally
+    Matches.Free;
   end;
 end;
 

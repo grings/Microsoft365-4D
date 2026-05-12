@@ -13,6 +13,9 @@ type
     ['{C3D4E5F6-A7B8-4C5D-0E1F-2A3B4C5D6E7F}']
     function ListEvents(const StartDateTime: TDateTime; const EndDateTime: TDateTime;
       const Top: Integer = 50; const Timezone: string = ''): TArray<TCalendarEvent>;
+    function SearchEvents(const Query: string;
+      const StartDateTime: TDateTime; const EndDateTime: TDateTime;
+      const Timezone: string = ''): TArray<TCalendarEvent>;
     function GetEvent(const EventId: string): TCalendarEvent;
     function CreateEvent(const Subject: string; const StartDateTime: TDateTime;
       const EndDateTime: TDateTime; const Location: string; const Body: string;
