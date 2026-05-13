@@ -15,7 +15,7 @@ type
       const Top: Integer = 50; const Timezone: string = ''): TArray<TCalendarEvent>;
     function SearchEvents(const Query: string;
       const StartDateTime: TDateTime; const EndDateTime: TDateTime;
-      const Timezone: string = ''): TArray<TCalendarEvent>;
+      const Timezone: string = ''; const BodyAsText: Boolean = True): TArray<TCalendarEvent>;
     function GetEvent(const EventId: string): TCalendarEvent;
     function CreateEvent(const Subject: string; const StartDateTime: TDateTime;
       const EndDateTime: TDateTime; const Location: string; const Body: string;

@@ -31,9 +31,12 @@ type
     class function ParseScheduleItem(const ItemObj: TJSONObject): TScheduleItemEntry; static;
     class function ParseScheduleResult(const ScheduleObj: TJSONObject): TScheduleResult; static;
 
-    function FetchCalendarPage(const QueryParams: string; const Timezone: string;
+    // PreferTokens are tokens that go in the HTTP "Prefer:" header
+    // (e.g. 'outlook.timezone="Europe/Amsterdam"', 'outlook.body-content-type="text"').
+    // The helper joins them comma-separated into a single Prefer header line.
+    function FetchCalendarPage(const QueryParams: string; const PreferTokens: TArray<string>;
       out NextLink: string): TArray<TCalendarEvent>;
-    function FetchCalendarPageFromUrl(const FullUrl: string;
+    function FetchCalendarPageFromUrl(const FullUrl: string; const PreferTokens: TArray<string>;
       out NextLink: string): TArray<TCalendarEvent>;
   public
     constructor Create(const AccessToken: string; const LogProc: TLogProc = nil); overload;
@@ -44,7 +47,7 @@ type
       const Top: Integer = 50; const Timezone: string = ''): TArray<TCalendarEvent>;
     function SearchEvents(const Query: string;
       const StartDateTime: TDateTime; const EndDateTime: TDateTime;
-      const Timezone: string = ''): TArray<TCalendarEvent>;
+      const Timezone: string = ''; const BodyAsText: Boolean = True): TArray<TCalendarEvent>;
     function GetEvent(const EventId: string): TCalendarEvent;
     function CreateEvent(const Subject: string; const StartDateTime: TDateTime;
       const EndDateTime: TDateTime; const Location: string; const Body: string;
@@ -274,16 +277,39 @@ begin
     Result.Items[Index] := ParseScheduleItem(TGraphJson.ArrayItem(ItemsArr, Index));
 end;
 
+function BuildPreferHeaders(const PreferTokens: TArray<string>): TArray<string>;
+begin
+  Result := nil;
+  if Length(PreferTokens) = 0 then
+    Exit;
+
+  var Combined := '';
+  for var Token in PreferTokens do
+  begin
+    if Token.Trim.IsEmpty then
+      Continue;
+    if not Combined.IsEmpty then
+      Combined := Combined + ', ';
+    Combined := Combined + Token;
+  end;
+
+  if Combined.IsEmpty then
+    Exit;
+
+  Result := TArray<string>.Create('Prefer: ' + Combined);
+end;
+
 function TCalendarClient.FetchCalendarPage(const QueryParams: string;
-  const Timezone: string; out NextLink: string): TArray<TCalendarEvent>;
+  const PreferTokens: TArray<string>; out NextLink: string): TArray<TCalendarEvent>;
 begin
   Result := nil;
   NextLink := '';
 
+  const Headers = BuildPreferHeaders(PreferTokens);
+
   var Response: TJSONObject;
-  if not Timezone.Trim.IsEmpty then
-    Response := FGraphClient.GetWithHeaders(EndpointCalendarView, QueryParams,
-      TArray<string>.Create('Prefer: outlook.timezone="' + Timezone + '"'))
+  if Length(Headers) > 0 then
+    Response := FGraphClient.GetWithHeaders(EndpointCalendarView, QueryParams, Headers)
   else
     Response := FGraphClient.Get(EndpointCalendarView, QueryParams);
 
@@ -308,12 +334,19 @@ begin
 end;
 
 function TCalendarClient.FetchCalendarPageFromUrl(const FullUrl: string;
-  out NextLink: string): TArray<TCalendarEvent>;
+  const PreferTokens: TArray<string>; out NextLink: string): TArray<TCalendarEvent>;
 begin
   Result := nil;
   NextLink := '';
 
-  var Response := FGraphClient.GetAbsoluteUrl(FullUrl);
+  const Headers = BuildPreferHeaders(PreferTokens);
+
+  var Response: TJSONObject;
+  if Length(Headers) > 0 then
+    Response := FGraphClient.GetAbsoluteUrlWithHeaders(FullUrl, Headers)
+  else
+    Response := FGraphClient.GetAbsoluteUrl(FullUrl);
+
   try
     if TGraphJson.HasError(Response) then
       raise EGraphApiException.Create(TGraphJson.GetErrorMessage(Response));
@@ -350,13 +383,17 @@ begin
     'startDateTime=%s&endDateTime=%s&$top=%d&$orderby=start/dateTime&$select=id,subject,start,end,location,organizer,attendees,isAllDay,isCancelled,webLink,bodyPreview',
     [TNetEncoding.URL.Encode(StartISO), TNetEncoding.URL.Encode(EndISO), ActualTop]);
 
+  var PreferTokens: TArray<string> := nil;
+  if not Timezone.Trim.IsEmpty then
+    PreferTokens := TArray<string>.Create('outlook.timezone="' + Timezone + '"');
+
   var IgnoredNextLink := '';
-  Result := FetchCalendarPage(QueryParams, Timezone, IgnoredNextLink);
+  Result := FetchCalendarPage(QueryParams, PreferTokens, IgnoredNextLink);
 end;
 
 function TCalendarClient.SearchEvents(const Query: string;
   const StartDateTime: TDateTime; const EndDateTime: TDateTime;
-  const Timezone: string): TArray<TCalendarEvent>;
+  const Timezone: string; const BodyAsText: Boolean): TArray<TCalendarEvent>;
 const
   GraphMaxPageSize = 1000;
 begin
@@ -371,30 +408,41 @@ begin
     'startDateTime=%s&endDateTime=%s&$top=%d&$orderby=start/dateTime&$select=id,subject,start,end,location,organizer,attendees,isAllDay,isCancelled,webLink,body,bodyPreview',
     [TNetEncoding.URL.Encode(StartISO), TNetEncoding.URL.Encode(EndISO), GraphMaxPageSize]);
 
-  const QueryLower = Query.ToLower;
-  var Matches := TList<TCalendarEvent>.Create;
+  var PreferTokens := TList<string>.Create;
   try
-    var NextLink := '';
-    var Page := FetchCalendarPage(QueryParams, Timezone, NextLink);
-    while True do
-    begin
-      for var Event in Page do
+    if not Timezone.Trim.IsEmpty then
+      PreferTokens.Add('outlook.timezone="' + Timezone + '"');
+    if BodyAsText then
+      PreferTokens.Add('outlook.body-content-type="text"');
+
+    const PreferArray = PreferTokens.ToArray;
+    const QueryLower = Query.ToLower;
+    var Matches := TList<TCalendarEvent>.Create;
+    try
+      var NextLink := '';
+      var Page := FetchCalendarPage(QueryParams, PreferArray, NextLink);
+      while True do
       begin
-        const SubjectHit = Event.Subject.ToLower.Contains(QueryLower);
-        const BodyHit = Event.Body.ToLower.Contains(QueryLower);
-        if SubjectHit or BodyHit then
-          Matches.Add(Event);
+        for var Event in Page do
+        begin
+          const SubjectHit = Event.Subject.ToLower.Contains(QueryLower);
+          const BodyHit = Event.Body.ToLower.Contains(QueryLower);
+          if SubjectHit or BodyHit then
+            Matches.Add(Event);
+        end;
+
+        if NextLink.IsEmpty then
+          Break;
+
+        Page := FetchCalendarPageFromUrl(NextLink, PreferArray, NextLink);
       end;
 
-      if NextLink.IsEmpty then
-        Break;
-
-      Page := FetchCalendarPageFromUrl(NextLink, NextLink);
+      Result := Matches.ToArray;
+    finally
+      Matches.Free;
     end;
-
-    Result := Matches.ToArray;
   finally
-    Matches.Free;
+    PreferTokens.Free;
   end;
 end;
 
